@@ -1,43 +1,46 @@
-from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Request
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, Depends, UploadFile, File, Form, HTTPException
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from sqlalchemy.orm import Session
 from typing import List, Optional
-from models import PresetSize, ThumbnailMetadata
+from database import SessionLocal, DBUser, DBThumbnail
 import services
 
-router = APIRouter(prefix="/thumbnails", tags=["Thumbnails"])
+router = APIRouter(tags=["Thumbnails"])
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
-@router.post("/", response_model=List[ThumbnailMetadata], status_code=201)
-async def create_thumbnails(
-    request: Request,
-    files: List[UploadFile] = File(..., description="One or more images to upload"),
-    preset: Optional[PresetSize] = Form(None, description="Preset size (small, medium, large)"),
-    width: Optional[int] = Form(None, description="Custom width (must provide height if used)"),
-    height: Optional[int] = Form(None, description="Custom height (must provide width if used)")
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+async def get_current_user(token: str = Depends(oauth2_scheme)):
+    return token 
+
+@router.post("/token")
+async def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
+    user = db.query(DBUser).filter(DBUser.username == form_data.username).first()
+    if not user:
+        user = DBUser(username=form_data.username, hashed_password=form_data.password)
+        db.add(user)
+        db.commit()
+    return {"access_token": user.username, "token_type": "bearer"}
+
+@router.post("/thumbnails/")
+async def create_thumbnail(
+    files: List[UploadFile] = File(...),
+    width: int = Form(300),
+    height: int = Form(300),
+    current_user: str = Depends(get_current_user),
+    db: Session = Depends(get_db)
 ):
-
-    if preset:
-        target_width, target_height = preset.get_dimensions()
-    elif width and height:
-        if width <= 0 or height <= 0:
-            raise HTTPException(status_code=400, detail="Width and height must be positive integers.")
-        target_width, target_height = width, height
-    else:
-        raise HTTPException(status_code=400, detail="Must provide either 'preset' OR both 'width' and 'height'.")
-
-    base_url = str(request.base_url).rstrip("/")
-    
     results = []
     for file in files:
-        metadata = services.process_and_save_image(file, target_width, target_height, base_url)
-        results.append(metadata)
-        
+        res = services.process_and_upload(file, width, height, current_user, db)
+        results.append(res)
     return results
 
-@router.get("/{thumb_id}", response_model=ThumbnailMetadata)
-async def get_thumbnail_metadata(thumb_id: str):
-    return services.get_metadata(thumb_id)
-
-@router.get("/{thumb_id}/image")
-async def get_thumbnail_image(thumb_id: str):
-    filepath = services.get_image_path(thumb_id)
-    return FileResponse(filepath, media_type="image/jpeg")
+@router.get("/thumbnails/me")
+async def get_my_thumbnails(current_user: str = Depends(get_current_user), db: Session = Depends(get_db)):
+    return db.query(DBThumbnail).filter(DBThumbnail.owner_id == current_user).all()
