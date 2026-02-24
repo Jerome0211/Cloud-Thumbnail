@@ -1,65 +1,65 @@
 import os
 import uuid
+import boto3
 from io import BytesIO
-from PIL import Image, UnidentifiedImageError
+from PIL import Image
 from fastapi import UploadFile, HTTPException
-from models import ThumbnailMetadata
+from sqlalchemy.orm import Session
+from database import DBThumbnail
 
-STORAGE_DIR = "static/images"
-os.makedirs(STORAGE_DIR, exist_ok=True)
+# DigitalOcean Spaces Config
+SPACES_KEY = os.getenv("SPACES_KEY")
+SPACES_SECRET = os.getenv("SPACES_SECRET")
+SPACES_REGION = os.getenv("SPACES_REGION")
+SPACES_BUCKET = os.getenv("SPACES_BUCKET")
 
-metadata_db: dict[str, ThumbnailMetadata] = {}
+session = boto3.session.Session()
+s3_client = session.client('s3',
+    region_name=SPACES_REGION,
+    endpoint_url=f"https://{SPACES_REGION}.digitaloceanspaces.com",
+    aws_access_key_id=SPACES_KEY,
+    aws_secret_access_key=SPACES_SECRET
+)
 
-def process_and_save_image(
-    file: UploadFile, 
-    target_width: int, 
-    target_height: int, 
-    base_url: str
-) -> ThumbnailMetadata:
-
+# 必须叫这个名字：process_and_upload
+def process_and_upload(file: UploadFile, width: int, height: int, owner_id: str, db: Session):
     try:
         contents = file.file.read()
-        image = Image.open(BytesIO(contents))
+        img = Image.open(BytesIO(contents))
         
-        if image.mode != 'RGB':
-            image = image.convert('RGB')
-
-        image.thumbnail((target_width, target_height))
+        # Resize
+        img.thumbnail((width, height))
         
-        thumb_id = str(uuid.uuid4())
-        filename = f"{thumb_id}.jpg"
-        filepath = os.path.join(STORAGE_DIR, filename)
+        # Save to buffer
+        buffer = BytesIO()
+        img.save(buffer, format="JPEG", quality=85)
+        buffer.seek(0)
         
-        image.save(filepath, format="JPEG", quality=85)
+        # Upload
+        file_id = str(uuid.uuid4())
+        cloud_filename = f"thumbnails/{owner_id}/{file_id}.jpg"
         
-        metadata = ThumbnailMetadata(
-            id=thumb_id,
-            original_filename=file.filename or "unknown",
-            width=image.width,
-            height=image.height,
-            format="JPEG",
-            url=f"{base_url}/thumbnails/{thumb_id}/image"
+        s3_client.upload_fileobj(
+            buffer,
+            SPACES_BUCKET,
+            cloud_filename,
+            ExtraArgs={'ACL': 'public-read', 'ContentType': 'image/jpeg'}
         )
         
-        metadata_db[thumb_id] = metadata
-        return metadata
-
-    except UnidentifiedImageError:
-        raise HTTPException(status_code=400, detail=f"File {file.filename} is not a valid image.")
+        cloud_url = f"https://{SPACES_BUCKET}.{SPACES_REGION}.digitaloceanspaces.com/{cloud_filename}"
+        
+        # DB Record
+        db_record = DBThumbnail(
+            id=file_id,
+            owner_id=owner_id,
+            original_filename=file.filename,
+            width=img.width,
+            height=img.height,
+            url=cloud_url
+        )
+        db.add(db_record)
+        db.commit()
+        db.refresh(db_record)
+        return db_record
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error processing {file.filename}: {str(e)}")
-    finally:
-        file.file.close()
-
-def get_metadata(thumb_id: str) -> ThumbnailMetadata:
-    if thumb_id not in metadata_db:
-        raise HTTPException(status_code=404, detail="Thumbnail not found")
-    return metadata_db[thumb_id]
-
-def get_image_path(thumb_id: str) -> str:
-    if thumb_id not in metadata_db:
-        raise HTTPException(status_code=404, detail="Thumbnail not found")
-    filepath = os.path.join(STORAGE_DIR, f"{thumb_id}.jpg")
-    if not os.path.exists(filepath):
-        raise HTTPException(status_code=404, detail="Image file missing on disk")
-    return filepath
+        raise HTTPException(status_code=500, detail=str(e))
