@@ -21,7 +21,6 @@ s3_client = session.client('s3',
     aws_secret_access_key=SPACES_SECRET
 )
 
-# 必须叫这个名字：process_and_upload
 def process_and_upload(file: UploadFile, width: int, height: int, owner_id: str, db: Session):
     try:
         contents = file.file.read()
@@ -63,3 +62,4 @@ def process_and_upload(file: UploadFile, width: int, height: int, owner_id: str,
         return db_record
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
