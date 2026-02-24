@@ -116,7 +116,7 @@
 </div>
 
 <script>
-    const API_BASE_URL = ""; // Empty string assumes frontend and backend are on the same domain
+    const API_BASE_URL = window.location.origin; // Empty string assumes frontend and backend are on the same domain
     let token = localStorage.getItem("access_token");
 
     // UI Toggle Logic
